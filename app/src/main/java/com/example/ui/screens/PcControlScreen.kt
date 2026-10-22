@@ -185,6 +185,57 @@ fun PcControlScreen(
             }
         }
 
+        // Battery Optimization Exemption Card
+        item {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val activity = context as? android.app.Activity
+
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("battery_opt_card"),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = JarvisSurfaceCard),
+                border = androidx.compose.foundation.BorderStroke(1.dp, if (uiState.isBatteryOptimizationExempt) JarvisLime.copy(alpha = 0.5f) else JarvisAmber.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Battery Optimization (Doze Mode)",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = if (uiState.isBatteryOptimizationExempt)
+                                "Exempt: Background microphone active 24/7 without Android sleep"
+                            else
+                                "Restricted: Android may pause listening when screen is off",
+                            color = if (uiState.isBatteryOptimizationExempt) JarvisLime else JarvisAmber,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    if (!uiState.isBatteryOptimizationExempt && activity != null) {
+                        Button(
+                            onClick = { viewModel.requestDisableBatteryOptimization(activity) },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = JarvisAmber,
+                                contentColor = Color.Black
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("disable_battery_opt_button")
+                        ) {
+                            Text("Exempt", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+
         // 2. Phone System Hardware Controls (Torch, Volume, Settings, Files)
         item {
             Text(

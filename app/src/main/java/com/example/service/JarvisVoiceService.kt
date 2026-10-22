@@ -11,8 +11,22 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import com.example.JarvisApplication
 import com.example.MainActivity
 import com.example.R
+import com.example.data.model.CommandHistoryEntity
+import com.example.data.model.CommandType
+import com.example.data.model.ParsedIntent
+import com.example.data.model.PcAction
+import com.example.data.repository.ActionExecutionResult
+import com.example.data.repository.AppLauncherRepository
+import com.example.data.repository.CalendarRepository
+import com.example.data.repository.ContactLookupResult
+import com.example.data.repository.ContactRepository
+import com.example.data.repository.GeminiIntentParser
+import com.example.data.repository.PcBridgeRepository
+import com.example.data.repository.PcBridgeResult
+import com.example.data.repository.SystemControlRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,16 +39,32 @@ class JarvisVoiceService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
     private var wakeLock: PowerManager.WakeLock? = null
-    private var speechManager: SpeechManager? = null
+    private var wakeWordDetector: LowPowerWakeWordDetector? = null
+
+    private lateinit var ttsManager: TtsManager
+    private lateinit var intentParser: GeminiIntentParser
+    private lateinit var systemControl: SystemControlRepository
+    private lateinit var pcBridge: PcBridgeRepository
+    private lateinit var appLauncher: AppLauncherRepository
+    private lateinit var contactRepo: ContactRepository
+    private lateinit var calendarRepo: CalendarRepository
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         _isServiceRunning.value = true
 
+        ttsManager = TtsManager(applicationContext)
+        intentParser = GeminiIntentParser()
+        systemControl = SystemControlRepository(applicationContext)
+        pcBridge = PcBridgeRepository(applicationContext)
+        appLauncher = AppLauncherRepository(applicationContext)
+        contactRepo = ContactRepository(applicationContext)
+        calendarRepo = CalendarRepository(applicationContext)
+
         createNotificationChannel()
         acquireWakeLock()
-        initBackgroundListener()
+        initWakeWordDetector()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -60,55 +90,133 @@ class JarvisVoiceService : Service() {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
             wakeLock = powerManager?.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
-                "JarvisAssistant:WakeLock"
+                "JarvisAssistant:BackgroundServiceLock"
             )?.apply {
-                acquire(10 * 60 * 1000L) // 10 minutes timeout per cycle
+                acquire(24 * 60 * 60 * 1000L) // 24 hours lock
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    private fun initBackgroundListener() {
-        speechManager = SpeechManager(applicationContext)
-        serviceScope.launch {
-            speechManager?.speechState?.collect { state ->
-                when (state) {
-                    is SpeechState.PartialResult -> {
-                        checkWakeWord(state.text)
-                    }
-                    is SpeechState.FinalResult -> {
-                        val detected = checkWakeWord(state.text)
-                        if (!detected) {
-                            // Cycle restart for continuous hands-free wake-word detection
-                            if (_isServiceRunning.value && _isListeningForWakeWord.value) {
-                                speechManager?.startListening()
-                            }
-                        }
-                    }
-                    is SpeechState.Error -> {
-                        // Restart listener if speech timed out waiting for wake word
-                        if (_isServiceRunning.value && _isListeningForWakeWord.value) {
-                            speechManager?.startListening()
-                        }
-                    }
-                    else -> {}
-                }
-            }
+    private fun initWakeWordDetector() {
+        wakeWordDetector = LowPowerWakeWordDetector(applicationContext) { spokenText ->
+            handleSpokenCommandInBackground(spokenText)
         }
     }
 
-    private fun checkWakeWord(text: String): Boolean {
-        val lower = text.lowercase().trim()
-        val wakeWords = listOf("hi jarvis", "hey jarvis", "ok jarvis", "jarvis", "namaste jarvis", "suno jarvis")
-        val match = wakeWords.any { lower.contains(it) }
+    private fun handleSpokenCommandInBackground(fullCommand: String) {
+        _lastDetectedCommand.value = fullCommand
+        updateNotification("Command received: \"$fullCommand\"")
 
-        if (match) {
-            _wakeWordDetectedEvent.value = text
-            launchMainActivityFromLockscreen(text)
-            return true
+        serviceScope.launch {
+            val parsed = intentParser.parseCommand(fullCommand)
+
+            // If command is an emergency stop
+            if (parsed.commandType == CommandType.EMERGENCY_STOP) {
+                ttsManager.stop()
+                ttsManager.speak("Emergency stop activated. Halting all operations.")
+                logCommandToDb(fullCommand, "EMERGENCY_STOP", "Emergency halt", "CANCELLED", "Halted")
+                return@launch
+            }
+
+            // If action is consequential (calling, sending message, pc shutdown) or requires UI,
+            // bring up MainActivity safely on top of lock screen
+            if (parsed.isConsequential || parsed.commandType == CommandType.CALL_PHONE || parsed.commandType == CommandType.WHATSAPP_MESSAGE) {
+                ttsManager.speak(parsed.spokenResponse)
+                launchMainActivityFromLockscreen(fullCommand)
+                return@launch
+            }
+
+            // Direct hands-free background execution without opening app!
+            when (parsed.commandType) {
+                CommandType.TORCH_TOGGLE -> {
+                    val turnOn = parsed.settingValue == "on"
+                    systemControl.toggleTorch(turnOn)
+                    ttsManager.speak(parsed.spokenResponse)
+                    logCommandToDb(fullCommand, "TORCH_TOGGLE", "Flashlight $turnOn", "SUCCESS", parsed.spokenResponse)
+                }
+
+                CommandType.VOLUME_CONTROL -> {
+                    when (parsed.settingValue) {
+                        "up" -> systemControl.adjustVolume(true)
+                        "down" -> systemControl.adjustVolume(false)
+                        "mute" -> systemControl.setMute(true)
+                    }
+                    ttsManager.speak(parsed.spokenResponse)
+                    logCommandToDb(fullCommand, "VOLUME_CONTROL", "Volume ${parsed.settingValue}", "SUCCESS", parsed.spokenResponse)
+                }
+
+                CommandType.PC_COMMAND -> {
+                    val pcAct = parsed.pcAction ?: PcAction.PING
+                    val result = pcBridge.sendPcAction(pcAct, parsed.pcPayload)
+                    val reply = when (result) {
+                        is PcBridgeResult.Success -> result.message
+                        is PcBridgeResult.Failure -> result.error
+                    }
+                    ttsManager.speak(reply)
+                    logCommandToDb(fullCommand, "PC_COMMAND", pcAct.name, "SUCCESS", reply)
+                }
+
+                CommandType.READ_CALENDAR -> {
+                    val events = calendarRepo.getUpcomingEvents(3)
+                    val summary = calendarRepo.formatEventsForSpeech(events)
+                    ttsManager.speak(summary)
+                    logCommandToDb(fullCommand, "READ_CALENDAR", "Calendar check", "SUCCESS", summary)
+                }
+
+                CommandType.SYSTEM_SETTING -> {
+                    systemControl.openSystemSettings(parsed.settingTarget ?: "settings")
+                    ttsManager.speak(parsed.spokenResponse)
+                    logCommandToDb(fullCommand, "SYSTEM_SETTING", parsed.settingTarget ?: "Settings", "SUCCESS", parsed.spokenResponse)
+                }
+
+                CommandType.LAUNCH_APP -> {
+                    val pkg = parsed.targetPackage ?: when (parsed.targetApp?.lowercase()) {
+                        "whatsapp" -> "com.whatsapp"
+                        "instagram" -> "com.instagram.android"
+                        "youtube" -> "com.google.android.youtube"
+                        else -> null
+                    }
+                    if (pkg != null) {
+                        appLauncher.openApp(pkg, parsed.targetApp ?: "App")
+                        ttsManager.speak(parsed.spokenResponse)
+                        logCommandToDb(fullCommand, "LAUNCH_APP", parsed.targetApp ?: "App", "SUCCESS", parsed.spokenResponse)
+                    }
+                }
+
+                CommandType.YOUTUBE_SEARCH -> {
+                    val q = parsed.searchQuery ?: "Python tutorials"
+                    appLauncher.openYouTubeSearch(q)
+                    ttsManager.speak("Searching YouTube for $q.")
+                    logCommandToDb(fullCommand, "YOUTUBE_SEARCH", q, "SUCCESS", "YouTube search initiated.")
+                }
+
+                else -> {
+                    ttsManager.speak(parsed.spokenResponse)
+                    launchMainActivityFromLockscreen(fullCommand)
+                }
+            }
+
+            updateNotification("Listening for \"Hello Jarvis\"...")
         }
-        return false
+    }
+
+    private suspend fun logCommandToDb(raw: String, type: String, summary: String, status: String, msg: String) {
+        try {
+            val db = (application as JarvisApplication).database
+            db.commandDao().insertCommand(
+                CommandHistoryEntity(
+                    rawCommand = raw,
+                    commandType = type,
+                    targetSummary = summary,
+                    executionStatus = status,
+                    statusMessage = msg
+                )
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun launchMainActivityFromLockscreen(command: String) {
@@ -123,13 +231,13 @@ class JarvisVoiceService : Service() {
 
     fun startWakeWordListening() {
         _isListeningForWakeWord.value = true
-        speechManager?.startListening()
-        updateNotification("Listening for \"Hi Jarvis\"...")
+        wakeWordDetector?.startListening()
+        updateNotification("Listening for \"Hello Jarvis\"...")
     }
 
     fun stopWakeWordListening() {
         _isListeningForWakeWord.value = false
-        speechManager?.stopListening()
+        wakeWordDetector?.stopListening()
         updateNotification("Wake word paused.")
     }
 
@@ -148,7 +256,7 @@ class JarvisVoiceService : Service() {
                 "Jarvis Background Assistant",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps Jarvis wake word listening active in background."
+                description = "Keeps Jarvis hands-free wake word listening active in background."
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
@@ -156,7 +264,7 @@ class JarvisVoiceService : Service() {
         }
     }
 
-    private fun buildForegroundNotification(statusText: String = "Listening for \"Hi Jarvis\"..."): Notification {
+    private fun buildForegroundNotification(statusText: String = "Listening for \"Hello Jarvis\"..."): Notification {
         val openAppIntent = PendingIntent.getActivity(
             this,
             0,
@@ -172,7 +280,7 @@ class JarvisVoiceService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Jarvis AI Assistant // Active")
+            .setContentTitle("Jarvis AI Assistant // Hands-Free Active")
             .setContentText(statusText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(openAppIntent)
@@ -192,7 +300,8 @@ class JarvisVoiceService : Service() {
         instance = null
         _isServiceRunning.value = false
         _isListeningForWakeWord.value = false
-        speechManager?.destroyRecognizer()
+        wakeWordDetector?.stopListening()
+        ttsManager.shutdown()
         if (wakeLock?.isHeld == true) {
             wakeLock?.release()
         }
@@ -217,8 +326,8 @@ class JarvisVoiceService : Service() {
         private val _isListeningForWakeWord = MutableStateFlow(false)
         val isListeningForWakeWord: StateFlow<Boolean> = _isListeningForWakeWord.asStateFlow()
 
-        private val _wakeWordDetectedEvent = MutableStateFlow<String?>(null)
-        val wakeWordDetectedEvent: StateFlow<String?> = _wakeWordDetectedEvent.asStateFlow()
+        private val _lastDetectedCommand = MutableStateFlow<String?>(null)
+        val lastDetectedCommand: StateFlow<String?> = _lastDetectedCommand.asStateFlow()
 
         fun start(context: Context) {
             val intent = Intent(context, JarvisVoiceService::class.java).apply {

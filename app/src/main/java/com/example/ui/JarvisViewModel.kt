@@ -69,6 +69,7 @@ data class JarvisUiState(
     val isTorchOn: Boolean = false,
     val isBackgroundServiceRunning: Boolean = false,
     val isWakeWordListening: Boolean = false,
+    val isBatteryOptimizationExempt: Boolean = false,
     val pcConnectionStatus: String = "PC Control Idle",
     val executionLog: String? = null
 )
@@ -176,10 +177,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = _uiState.value.copy(isWakeWordListening = listening)
             }
         }
+
         viewModelScope.launch {
-            JarvisVoiceService.wakeWordDetectedEvent.collect { wakeEvent ->
-                if (!wakeEvent.isNullOrEmpty()) {
-                    processVoiceCommand(wakeEvent)
+            JarvisVoiceService.lastDetectedCommand.collect { cmd ->
+                if (!cmd.isNullOrEmpty()) {
+                    _uiState.value = _uiState.value.copy(
+                        transcript = cmd,
+                        assistantReply = "Background Voice: \"$cmd\""
+                    )
                 }
             }
         }
@@ -663,10 +668,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val hasPhone = ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
         val hasCal = ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED
         val hasAccessibility = JarvisAccessibilityService.isAccessibilitySettingsEnabled(ctx)
+        val hasBattExempt = biometricHelper.isBatteryOptimizationIgnored()
 
         _uiState.value = _uiState.value.copy(
-            permissionStatus = PermissionStatus(hasMic, hasContacts, hasPhone, hasCal, hasAccessibility)
+            permissionStatus = PermissionStatus(hasMic, hasContacts, hasPhone, hasCal, hasAccessibility),
+            isBatteryOptimizationExempt = hasBattExempt
         )
+    }
+
+    fun requestDisableBatteryOptimization(activity: android.app.Activity) {
+        biometricHelper.requestIgnoreBatteryOptimization(activity)
+        refreshPermissionStatus()
     }
 
     private fun vibrateFeedback(durationMs: Long) {

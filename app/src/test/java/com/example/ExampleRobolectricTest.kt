@@ -70,6 +70,17 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun testHelloJarvisWakeWord() = runBlocking {
+        val result1 = intentParser.parseCommand("Hello Jarvis, turn on flashlight")
+        assertEquals(CommandType.TORCH_TOGGLE, result1.commandType)
+        assertEquals("on", result1.settingValue)
+
+        val result2 = intentParser.parseCommand("Hello Jarvis, lock my PC")
+        assertEquals(CommandType.PC_COMMAND, result2.commandType)
+        assertEquals(PcAction.LOCK_PC, result2.pcAction)
+    }
+
+    @Test
     fun testParseHinglishCall() = runBlocking {
         val result = intentParser.parseCommand("Papa ko call lagao")
         assertEquals(CommandType.CALL_PHONE, result.commandType)
