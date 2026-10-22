@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Jarvis Assistant</string>
+    <string name="accessibility_service_description">Jarvis Assistant Accessibility Service enables authorized hands-free UI automation to send messages and navigate supported actions when voice commands are initiated by the user.</string>
+</resources>
