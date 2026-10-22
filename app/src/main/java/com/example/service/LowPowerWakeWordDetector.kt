@@ -40,15 +40,22 @@ class LowPowerWakeWordDetector(
     private var speechManager: SpeechManager? = null
     private var powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
 
+    @Volatile
+    private var isRecognizingSpeech = false
+
     // Energy threshold to distinguish ambient silence from voice activity
-    var energyThreshold: Float = 1200f
+    var energyThreshold: Float = 1100f
 
     fun startListening() {
         if (_isListening.value) return
         _isListening.value = true
 
         initSpeechManager()
+        startAudioRecordLoop()
+    }
 
+    private fun startAudioRecordLoop() {
+        recordingJob?.cancel()
         recordingJob = scope.launch {
             val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
             val bufferSize = minBufferSize.coerceAtLeast(3200) // 100ms frames at 16kHz
@@ -74,13 +81,28 @@ class LowPowerWakeWordDetector(
                     )
                 }
 
-                audioRecord?.startRecording()
-                Log.i("WakeWordDetector", "Low-power wake-word detector active")
+                if (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
+                    audioRecord?.startRecording()
+                    Log.i("WakeWordDetector", "Low-power background voice listener active")
+                } else {
+                    Log.w("WakeWordDetector", "AudioRecord initialization unviable")
+                }
 
                 var voiceFramesConsecutive = 0
 
                 while (isActive && _isListening.value) {
-                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                    if (isRecognizingSpeech) {
+                        delay(100)
+                        continue
+                    }
+
+                    val record = audioRecord
+                    if (record == null || record.state != AudioRecord.STATE_INITIALIZED || record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                        delay(100)
+                        continue
+                    }
+
+                    val read = record.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         // Compute Root Mean Square (RMS) energy
                         var sum = 0.0
@@ -90,20 +112,16 @@ class LowPowerWakeWordDetector(
                         val rms = sqrt(sum / read).toFloat()
                         _rmsEnergy.value = (rms / 300f).coerceIn(0f, 10f)
 
-                        // VAD check
+                        // VAD check: detect sustained human speech
                         if (rms > energyThreshold) {
                             voiceFramesConsecutive++
-                            // When sustained voice is detected (e.g. user spoke "Hello Jarvis"),
-                            // switch to acoustic speech recognition to extract command
-                            if (voiceFramesConsecutive >= 2) {
+                            if (voiceFramesConsecutive >= 2 && !isRecognizingSpeech) {
                                 voiceFramesConsecutive = 0
-                                handlePotentialWakeWord()
-                                delay(1800) // Debounce window
+                                pauseAudioAndRecognize()
                             }
                         } else {
                             voiceFramesConsecutive = 0
-                            // Low-power sleep to conserve CPU and battery during silence
-                            delay(50)
+                            delay(40)
                         }
                     } else {
                         delay(50)
@@ -117,7 +135,14 @@ class LowPowerWakeWordDetector(
         }
     }
 
-    private fun handlePotentialWakeWord() {
+    private fun pauseAudioAndRecognize() {
+        isRecognizingSpeech = true
+        try {
+            audioRecord?.stop()
+        } catch (e: Exception) {
+            Log.w("WakeWordDetector", "Failed to pause AudioRecord: ${e.message}")
+        }
+
         // Play subtle futuristic Jarvis chime
         playJarvisChime()
 
@@ -130,6 +155,23 @@ class LowPowerWakeWordDetector(
         }
     }
 
+    private fun resumeAudioRecording() {
+        scope.launch {
+            delay(400) // Allow speech recognizer to fully release microphone hardware
+            if (_isListening.value) {
+                try {
+                    val record = audioRecord
+                    if (record != null && record.state == AudioRecord.STATE_INITIALIZED && record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                        record.startRecording()
+                    }
+                } catch (e: Exception) {
+                    Log.w("WakeWordDetector", "Failed to resume AudioRecord: ${e.message}")
+                }
+                isRecognizingSpeech = false
+            }
+        }
+    }
+
     private fun initSpeechManager() {
         speechManager = SpeechManager(context)
         scope.launch(Dispatchers.Main) {
@@ -137,17 +179,15 @@ class LowPowerWakeWordDetector(
                 when (state) {
                     is SpeechState.FinalResult -> {
                         val text = state.text.trim()
-                        val lower = text.lowercase()
-                        val wakeWords = listOf("hello jarvis", "hi jarvis", "hey jarvis", "ok jarvis", "jarvis")
-                        val isWakeWord = wakeWords.any { lower.contains(it) }
-
-                        if (isWakeWord || lower.startsWith("jarvis")) {
+                        if (text.isNotEmpty()) {
+                            Log.i("WakeWordDetector", "Spoken command recognized in background: $text")
                             onWakeWordSpotted(text)
                         }
+                        resumeAudioRecording()
                     }
                     is SpeechState.Error -> {
-                        // Reset ready for next audio trigger
                         speechManager?.resetToIdle()
+                        resumeAudioRecording()
                     }
                     else -> {}
                 }
@@ -189,6 +229,7 @@ class LowPowerWakeWordDetector(
 
     fun stopListening() {
         _isListening.value = false
+        isRecognizingSpeech = false
         recordingJob?.cancel()
         recordingJob = null
         stopAudioRecord()

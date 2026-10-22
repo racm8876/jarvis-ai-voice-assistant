@@ -74,6 +74,7 @@ class MainActivity : ComponentActivity() {
                     contract = ActivityResultContracts.RequestMultiplePermissions()
                 ) {
                     viewModel.refreshPermissionStatus()
+                    com.example.service.JarvisVoiceService.start(this@MainActivity)
                 }
 
                 fun requestPermissions() {
@@ -103,6 +104,7 @@ class MainActivity : ComponentActivity() {
 
                 LaunchedEffect(Unit) {
                     requestPermissions()
+                    com.example.service.JarvisVoiceService.start(this@MainActivity)
                     // Check if launched from wake word background service
                     val wakeCommand = intent.getStringExtra("EXTRA_WAKE_COMMAND")
                     if (!wakeCommand.isNullOrEmpty()) {

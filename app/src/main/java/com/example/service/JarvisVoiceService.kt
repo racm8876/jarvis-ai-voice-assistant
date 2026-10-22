@@ -16,7 +16,6 @@ import com.example.MainActivity
 import com.example.R
 import com.example.data.model.CommandHistoryEntity
 import com.example.data.model.CommandType
-import com.example.data.model.ParsedIntent
 import com.example.data.model.PcAction
 import com.example.data.repository.ActionExecutionResult
 import com.example.data.repository.AppLauncherRepository
@@ -30,6 +29,7 @@ import com.example.data.repository.SystemControlRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -107,29 +107,118 @@ class JarvisVoiceService : Service() {
 
     private fun handleSpokenCommandInBackground(fullCommand: String) {
         _lastDetectedCommand.value = fullCommand
-        updateNotification("Command received: \"$fullCommand\"")
+        updateNotification("Processing: \"$fullCommand\"")
 
         serviceScope.launch {
             val parsed = intentParser.parseCommand(fullCommand)
 
-            // If command is an emergency stop
+            // 1. Emergency Stop
             if (parsed.commandType == CommandType.EMERGENCY_STOP) {
                 ttsManager.stop()
                 ttsManager.speak("Emergency stop activated. Halting all operations.")
                 logCommandToDb(fullCommand, "EMERGENCY_STOP", "Emergency halt", "CANCELLED", "Halted")
+                updateNotification("Emergency halt activated.")
                 return@launch
             }
 
-            // If action is consequential (calling, sending message, pc shutdown) or requires UI,
-            // bring up MainActivity safely on top of lock screen
-            if (parsed.isConsequential || parsed.commandType == CommandType.CALL_PHONE || parsed.commandType == CommandType.WHATSAPP_MESSAGE) {
-                ttsManager.speak(parsed.spokenResponse)
-                launchMainActivityFromLockscreen(fullCommand)
-                return@launch
-            }
-
-            // Direct hands-free background execution without opening app!
+            // 2. Automated background execution according to user command
             when (parsed.commandType) {
+                CommandType.CALL_PHONE -> {
+                    val rawTarget = parsed.contactName ?: fullCommand.replace(Regex("""(?i)^(?:call|dial|phone|karo|lagao)\s+"""), "").trim()
+                    val isNumber = rawTarget.matches(Regex("""[0-9+ ]{5,}"""))
+
+                    if (isNumber) {
+                        val reply = "Calling $rawTarget on phone."
+                        ttsManager.speak(reply)
+                        appLauncher.makePhoneCall(rawTarget, useDirectCall = true)
+                        logCommandToDb(fullCommand, "CALL_PHONE", rawTarget, "SUCCESS", reply)
+                    } else {
+                        val lookup = contactRepo.resolveContact(rawTarget)
+                        when (lookup) {
+                            is ContactLookupResult.Single -> {
+                                val contact = lookup.contact
+                                val reply = "Calling ${contact.name} now."
+                                ttsManager.speak(reply)
+                                appLauncher.makePhoneCall(contact.phoneNumber, useDirectCall = true)
+                                logCommandToDb(fullCommand, "CALL_PHONE", contact.name, "SUCCESS", reply)
+                            }
+                            is ContactLookupResult.Multiple -> {
+                                val top = lookup.candidates.first()
+                                val reply = "Calling ${top.name}."
+                                ttsManager.speak(reply)
+                                appLauncher.makePhoneCall(top.phoneNumber, useDirectCall = true)
+                                logCommandToDb(fullCommand, "CALL_PHONE", top.name, "SUCCESS", reply)
+                            }
+                            is ContactLookupResult.NotFound -> {
+                                val reply = "Contact $rawTarget not found. Opening phone dialer."
+                                ttsManager.speak(reply)
+                                appLauncher.makePhoneCall(rawTarget, useDirectCall = false)
+                                logCommandToDb(fullCommand, "CALL_PHONE", rawTarget, "PARTIAL", reply)
+                            }
+                            is ContactLookupResult.PermissionRequired -> {
+                                val reply = "Contacts permission required. Opening phone dialer."
+                                ttsManager.speak(reply)
+                                appLauncher.makePhoneCall("", useDirectCall = false)
+                                logCommandToDb(fullCommand, "CALL_PHONE", rawTarget, "FAILED", reply)
+                            }
+                        }
+                    }
+                }
+
+                CommandType.WHATSAPP_MESSAGE -> {
+                    val target = parsed.contactName ?: ""
+                    val msg = parsed.messageBody ?: ""
+                    var phoneToUse: String? = null
+                    var resolvedDisplayName = target
+
+                    if (target.isNotEmpty()) {
+                        if (target.matches(Regex("""[0-9+ ]{5,}"""))) {
+                            phoneToUse = target
+                        } else {
+                            val lookup = contactRepo.resolveContact(target)
+                            if (lookup is ContactLookupResult.Single) {
+                                phoneToUse = lookup.contact.phoneNumber
+                                resolvedDisplayName = lookup.contact.name
+                            } else if (lookup is ContactLookupResult.Multiple) {
+                                phoneToUse = lookup.candidates.first().phoneNumber
+                                resolvedDisplayName = lookup.candidates.first().name
+                            }
+                        }
+                    }
+
+                    val actionResult = appLauncher.openWhatsAppMessage(phoneToUse, msg)
+                    val reply = when (actionResult) {
+                        is ActionExecutionResult.Success -> "Sending WhatsApp message to $resolvedDisplayName: \"$msg\"."
+                        is ActionExecutionResult.AppNotInstalled -> "WhatsApp is not installed on this device."
+                        is ActionExecutionResult.Failure -> "Could not open WhatsApp: ${actionResult.reason}"
+                    }
+                    ttsManager.speak(reply)
+                    logCommandToDb(fullCommand, "WHATSAPP_MESSAGE", "$resolvedDisplayName: $msg", "SUCCESS", reply)
+                }
+
+                CommandType.WHATSAPP_VIDEO_CALL, CommandType.WHATSAPP_VOICE_CALL -> {
+                    val isVideo = parsed.commandType == CommandType.WHATSAPP_VIDEO_CALL
+                    val target = parsed.contactName ?: ""
+                    var phoneToUse = target
+                    var contactDisplayName = target
+
+                    if (target.isNotEmpty() && !target.matches(Regex("""[0-9+ ]{5,}"""))) {
+                        val lookup = contactRepo.resolveContact(target)
+                        if (lookup is ContactLookupResult.Single) {
+                            phoneToUse = lookup.contact.phoneNumber
+                            contactDisplayName = lookup.contact.name
+                        } else if (lookup is ContactLookupResult.Multiple) {
+                            phoneToUse = lookup.candidates.first().phoneNumber
+                            contactDisplayName = lookup.candidates.first().name
+                        }
+                    }
+
+                    appLauncher.startWhatsAppCall(phoneToUse, isVideo)
+                    val reply = "Starting WhatsApp ${if (isVideo) "video" else "voice"} call to $contactDisplayName."
+                    ttsManager.speak(reply)
+                    logCommandToDb(fullCommand, if (isVideo) "WHATSAPP_VIDEO_CALL" else "WHATSAPP_VOICE_CALL", contactDisplayName, "SUCCESS", reply)
+                }
+
                 CommandType.TORCH_TOGGLE -> {
                     val turnOn = parsed.settingValue == "on"
                     systemControl.toggleTorch(turnOn)
@@ -165,23 +254,25 @@ class JarvisVoiceService : Service() {
                     logCommandToDb(fullCommand, "READ_CALENDAR", "Calendar check", "SUCCESS", summary)
                 }
 
-                CommandType.SYSTEM_SETTING -> {
-                    systemControl.openSystemSettings(parsed.settingTarget ?: "settings")
-                    ttsManager.speak(parsed.spokenResponse)
-                    logCommandToDb(fullCommand, "SYSTEM_SETTING", parsed.settingTarget ?: "Settings", "SUCCESS", parsed.spokenResponse)
-                }
-
                 CommandType.LAUNCH_APP -> {
                     val pkg = parsed.targetPackage ?: when (parsed.targetApp?.lowercase()) {
                         "whatsapp" -> "com.whatsapp"
                         "instagram" -> "com.instagram.android"
                         "youtube" -> "com.google.android.youtube"
+                        "chrome" -> "com.android.chrome"
+                        "camera" -> "com.android.camera"
+                        "settings" -> "com.android.settings"
                         else -> null
                     }
                     if (pkg != null) {
                         appLauncher.openApp(pkg, parsed.targetApp ?: "App")
                         ttsManager.speak(parsed.spokenResponse)
                         logCommandToDb(fullCommand, "LAUNCH_APP", parsed.targetApp ?: "App", "SUCCESS", parsed.spokenResponse)
+                    } else {
+                        val reply = "Opening ${parsed.targetApp ?: "application"}."
+                        ttsManager.speak(reply)
+                        appLauncher.openApp("com.google.android.${parsed.targetApp?.lowercase()}", parsed.targetApp ?: "App")
+                        logCommandToDb(fullCommand, "LAUNCH_APP", parsed.targetApp ?: "App", "SUCCESS", reply)
                     }
                 }
 
@@ -192,13 +283,34 @@ class JarvisVoiceService : Service() {
                     logCommandToDb(fullCommand, "YOUTUBE_SEARCH", q, "SUCCESS", "YouTube search initiated.")
                 }
 
+                CommandType.WEB_SEARCH -> {
+                    val q = parsed.searchQuery ?: fullCommand
+                    systemControl.performWebSearch(q)
+                    ttsManager.speak("Searching the web for $q.")
+                    logCommandToDb(fullCommand, "WEB_SEARCH", q, "SUCCESS", "Web search initiated.")
+                }
+
+                CommandType.OPEN_FILE -> {
+                    systemControl.openFileManager()
+                    ttsManager.speak(parsed.spokenResponse)
+                    logCommandToDb(fullCommand, "OPEN_FILE", "File Browser", "SUCCESS", parsed.spokenResponse)
+                }
+
+                CommandType.SYSTEM_SETTING -> {
+                    systemControl.openSystemSettings(parsed.settingTarget ?: "settings")
+                    ttsManager.speak(parsed.spokenResponse)
+                    logCommandToDb(fullCommand, "SYSTEM_SETTING", parsed.settingTarget ?: "Settings", "SUCCESS", parsed.spokenResponse)
+                }
+
                 else -> {
                     ttsManager.speak(parsed.spokenResponse)
-                    launchMainActivityFromLockscreen(fullCommand)
+                    logCommandToDb(fullCommand, "GENERAL", "Spoken response", "SUCCESS", parsed.spokenResponse)
                 }
             }
 
-            updateNotification("Listening for \"Hello Jarvis\"...")
+            updateNotification("Executed: \"$fullCommand\"")
+            delay(3500)
+            updateNotification("Jarvis Active // Listening for commands in background")
         }
     }
 
@@ -219,26 +331,16 @@ class JarvisVoiceService : Service() {
         }
     }
 
-    private fun launchMainActivityFromLockscreen(command: String) {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra("EXTRA_WAKE_COMMAND", command)
-        }
-        startActivity(intent)
-    }
-
     fun startWakeWordListening() {
         _isListeningForWakeWord.value = true
         wakeWordDetector?.startListening()
-        updateNotification("Listening for \"Hello Jarvis\"...")
+        updateNotification("Jarvis Active // Listening for commands in background")
     }
 
     fun stopWakeWordListening() {
         _isListeningForWakeWord.value = false
         wakeWordDetector?.stopListening()
-        updateNotification("Wake word paused.")
+        updateNotification("Background voice listening paused.")
     }
 
     private fun toggleBackgroundListening() {
@@ -256,7 +358,7 @@ class JarvisVoiceService : Service() {
                 "Jarvis Background Assistant",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps Jarvis hands-free wake word listening active in background."
+                description = "Keeps Jarvis hands-free background listening active."
                 setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
@@ -264,7 +366,7 @@ class JarvisVoiceService : Service() {
         }
     }
 
-    private fun buildForegroundNotification(statusText: String = "Listening for \"Hello Jarvis\"..."): Notification {
+    private fun buildForegroundNotification(statusText: String = "Jarvis Active // Listening for commands in background"): Notification {
         val openAppIntent = PendingIntent.getActivity(
             this,
             0,
@@ -280,7 +382,7 @@ class JarvisVoiceService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Jarvis AI Assistant // Hands-Free Active")
+            .setContentTitle("Jarvis AI Assistant // Background Active")
             .setContentText(statusText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(openAppIntent)
