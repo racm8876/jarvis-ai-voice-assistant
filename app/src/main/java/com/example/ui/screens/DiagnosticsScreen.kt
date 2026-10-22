@@ -180,6 +180,8 @@ fun DiagnosticsScreen(
                     DiagnosticCheckRow("Calendar Provider", uiState.permissionStatus.hasCalendar, "$calendarCount events available")
                     DiagnosticCheckRow("Phone Calling Permission", uiState.permissionStatus.hasPhoneCall, if (uiState.permissionStatus.hasPhoneCall) "Granted" else "Dialer Fallback")
                     DiagnosticCheckRow("Accessibility Automation", uiState.permissionStatus.hasAccessibility, if (uiState.permissionStatus.hasAccessibility) "Enabled" else "Disabled")
+                    DiagnosticCheckRow("Background Wake Word Service", uiState.isBackgroundServiceRunning, if (uiState.isBackgroundServiceRunning) "Running" else "Stopped")
+                    DiagnosticCheckRow("Windows PC Bridge", true, uiState.pcConnectionStatus)
                 }
             }
         }
@@ -277,6 +279,26 @@ fun DiagnosticsScreen(
                             diagnosticLog = "[Calendar Test]: Retrieved ${events.size} events.\n$summary"
                             viewModel.ttsManager.speak(summary)
                         }
+                    }
+                )
+
+                // Test Windows PC Lock
+                DiagnosticActionButton(
+                    title = "Verify Windows PC Lock Intent",
+                    subtitle = "Sends lock command to PC companion server",
+                    onClick = {
+                        diagnosticLog = "[PC Test]: Triggering PC Lock..."
+                        viewModel.processVoiceCommand("Lock my PC")
+                    }
+                )
+
+                // Test Flashlight Toggle
+                DiagnosticActionButton(
+                    title = "Verify Flashlight Hardware Toggle",
+                    subtitle = "Toggles device camera LED flash",
+                    onClick = {
+                        val res = viewModel.systemControl.toggleTorch()
+                        diagnosticLog = "[Torch Test]: ${(res as? com.example.data.repository.ActionExecutionResult.Success)?.message ?: (res as? com.example.data.repository.ActionExecutionResult.Failure)?.reason}"
                     }
                 )
             }

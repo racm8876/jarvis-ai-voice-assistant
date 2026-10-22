@@ -14,14 +14,21 @@ import com.example.JarvisApplication
 import com.example.data.model.CommandHistoryEntity
 import com.example.data.model.CommandType
 import com.example.data.model.ParsedIntent
+import com.example.data.model.PcAction
+import com.example.data.model.PcServerConfig
 import com.example.data.model.ResolvedContact
 import com.example.data.repository.ActionExecutionResult
 import com.example.data.repository.AppLauncherRepository
+import com.example.data.repository.BiometricAuthHelper
 import com.example.data.repository.CalendarRepository
 import com.example.data.repository.ContactLookupResult
 import com.example.data.repository.ContactRepository
 import com.example.data.repository.GeminiIntentParser
+import com.example.data.repository.PcBridgeRepository
+import com.example.data.repository.PcBridgeResult
+import com.example.data.repository.SystemControlRepository
 import com.example.service.JarvisAccessibilityService
+import com.example.service.JarvisVoiceService
 import com.example.service.SpeechManager
 import com.example.service.SpeechState
 import com.example.service.TtsManager
@@ -51,7 +58,7 @@ data class JarvisUiState(
     val status: AssistantStatus = AssistantStatus.IDLE,
     val visualizerState: VisualizerState = VisualizerState.IDLE,
     val transcript: String = "",
-    val assistantReply: String = "Jarvis ready. Tap mic or ask a command.",
+    val assistantReply: String = "Jarvis ready. Tap mic or say \"Hi Jarvis\".",
     val currentIntent: ParsedIntent? = null,
     val pendingAction: ParsedIntent? = null,
     val countdownRemaining: Int = 5,
@@ -59,6 +66,10 @@ data class JarvisUiState(
     val clarificationMessage: String? = null,
     val permissionStatus: PermissionStatus = PermissionStatus(false, false, false, false, false),
     val isTtsMuted: Boolean = false,
+    val isTorchOn: Boolean = false,
+    val isBackgroundServiceRunning: Boolean = false,
+    val isWakeWordListening: Boolean = false,
+    val pcConnectionStatus: String = "PC Control Idle",
     val executionLog: String? = null
 )
 
@@ -73,6 +84,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     val contactRepo = ContactRepository(application)
     val calendarRepo = CalendarRepository(application)
     val appLauncher = AppLauncherRepository(application)
+    val systemControl = SystemControlRepository(application)
+    val pcBridge = PcBridgeRepository(application)
+    val biometricHelper = BiometricAuthHelper(application)
     val intentParser = GeminiIntentParser()
 
     val speechManager = SpeechManager(application)
@@ -82,12 +96,15 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     val uiState: StateFlow<JarvisUiState> = _uiState.asStateFlow()
 
     val rmsLevel: StateFlow<Float> = speechManager.rmsLevel
+    val pcConfig: StateFlow<PcServerConfig> = pcBridge.config
 
     private var countdownJob: Job? = null
 
     init {
         refreshPermissionStatus()
         observeSpeechState()
+        observeTorchState()
+        observeBackgroundService()
     }
 
     private fun observeSpeechState() {
@@ -137,6 +154,43 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     }
                 }
             }
+        }
+    }
+
+    private fun observeTorchState() {
+        viewModelScope.launch {
+            systemControl.isTorchOn.collect { on ->
+                _uiState.value = _uiState.value.copy(isTorchOn = on)
+            }
+        }
+    }
+
+    private fun observeBackgroundService() {
+        viewModelScope.launch {
+            JarvisVoiceService.isServiceRunning.collect { running ->
+                _uiState.value = _uiState.value.copy(isBackgroundServiceRunning = running)
+            }
+        }
+        viewModelScope.launch {
+            JarvisVoiceService.isListeningForWakeWord.collect { listening ->
+                _uiState.value = _uiState.value.copy(isWakeWordListening = listening)
+            }
+        }
+        viewModelScope.launch {
+            JarvisVoiceService.wakeWordDetectedEvent.collect { wakeEvent ->
+                if (!wakeEvent.isNullOrEmpty()) {
+                    processVoiceCommand(wakeEvent)
+                }
+            }
+        }
+    }
+
+    fun toggleBackgroundService() {
+        val app = getApplication<Application>()
+        if (_uiState.value.isBackgroundServiceRunning) {
+            JarvisVoiceService.stop(app)
+        } else {
+            JarvisVoiceService.start(app)
         }
     }
 
@@ -223,7 +277,6 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     }
                     is ContactLookupResult.Multiple -> {
-                        // Ambiguity! Ask clarification as required by Section 3 & 6
                         _uiState.value = _uiState.value.copy(
                             status = AssistantStatus.IDLE,
                             visualizerState = VisualizerState.IDLE,
@@ -235,9 +288,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         speakText("Found multiple contacts for ${parsed.contactName}. Which one should I select?")
                         return@launch
                     }
-                    is ContactLookupResult.NotFound -> {
-                        // Use raw name or proceed
-                    }
+                    is ContactLookupResult.NotFound -> {}
                     is ContactLookupResult.PermissionRequired -> {
                         _uiState.value = _uiState.value.copy(
                             status = AssistantStatus.ERROR,
@@ -252,7 +303,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
             _uiState.value = _uiState.value.copy(currentIntent = resolvedIntent)
 
-            // Consequential Action Handling: Require confirmation before sending or placing a call
+            // Consequential Action Handling
             if (resolvedIntent.isConsequential) {
                 _uiState.value = _uiState.value.copy(
                     status = AssistantStatus.CONFIRMATION_PENDING,
@@ -277,7 +328,6 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = _uiState.value.copy(countdownRemaining = sec)
                 delay(1000)
             }
-            // Auto execute if not cancelled
             confirmPendingAction()
         }
     }
@@ -354,6 +404,82 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             var executionStatus = "SUCCESS"
 
             when (intent.commandType) {
+                CommandType.PC_COMMAND -> {
+                    val pcAct = intent.pcAction ?: PcAction.PING
+                    val res = pcBridge.sendPcAction(pcAct, intent.pcPayload)
+                    when (res) {
+                        is PcBridgeResult.Success -> {
+                            executionResult = res.message
+                            speakText(res.message)
+                        }
+                        is PcBridgeResult.Failure -> {
+                            executionStatus = "FAILED"
+                            executionResult = res.error
+                            speakText(res.error)
+                        }
+                    }
+                }
+
+                CommandType.TORCH_TOGGLE -> {
+                    val turnOn = when (intent.settingValue) {
+                        "on" -> true
+                        "off" -> false
+                        else -> null
+                    }
+                    val res = systemControl.toggleTorch(turnOn)
+                    when (res) {
+                        is ActionExecutionResult.Success -> {
+                            executionResult = res.message
+                            speakText(res.message)
+                        }
+                        is ActionExecutionResult.Failure -> {
+                            executionStatus = "FAILED"
+                            executionResult = res.reason
+                            speakText(res.reason)
+                        }
+                        else -> {}
+                    }
+                }
+
+                CommandType.VOLUME_CONTROL -> {
+                    val res = when (intent.settingValue) {
+                        "up" -> systemControl.adjustVolume(true)
+                        "down" -> systemControl.adjustVolume(false)
+                        "mute" -> systemControl.setMute(true)
+                        else -> systemControl.adjustVolume(true)
+                    }
+                    if (res is ActionExecutionResult.Success) {
+                        executionResult = res.message
+                        speakText(res.message)
+                    }
+                }
+
+                CommandType.SYSTEM_SETTING -> {
+                    val target = intent.settingTarget ?: "settings"
+                    val res = systemControl.openSystemSettings(target)
+                    if (res is ActionExecutionResult.Success) {
+                        executionResult = res.message
+                        speakText(res.message)
+                    }
+                }
+
+                CommandType.WEB_SEARCH -> {
+                    val q = intent.searchQuery ?: "News"
+                    val res = systemControl.performWebSearch(q)
+                    if (res is ActionExecutionResult.Success) {
+                        executionResult = res.message
+                        speakText("Searching the web for $q.")
+                    }
+                }
+
+                CommandType.OPEN_FILE -> {
+                    val res = systemControl.openFileManager()
+                    if (res is ActionExecutionResult.Success) {
+                        executionResult = res.message
+                        speakText(res.message)
+                    }
+                }
+
                 CommandType.LAUNCH_APP -> {
                     val pkg = intent.targetPackage ?: when (intent.targetApp?.lowercase()) {
                         "whatsapp" -> "com.whatsapp"
@@ -480,7 +606,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 CommandHistoryEntity(
                     rawCommand = _uiState.value.transcript.ifEmpty { intent.spokenResponse },
                     commandType = intent.commandType.name,
-                    targetSummary = intent.targetApp ?: intent.contactName ?: intent.searchQuery ?: "Action",
+                    targetSummary = intent.targetApp ?: intent.contactName ?: intent.searchQuery ?: intent.settingTarget ?: "Action",
                     executionStatus = executionStatus,
                     statusMessage = executionResult
                 )
@@ -495,6 +621,27 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
         }
+    }
+
+    fun pingPc() {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(pcConnectionStatus = "Pinging Windows PC...")
+            val res = pcBridge.pingPc()
+            when (res) {
+                is PcBridgeResult.Success -> {
+                    _uiState.value = _uiState.value.copy(pcConnectionStatus = res.message)
+                    speakText("Connected to PC.")
+                }
+                is PcBridgeResult.Failure -> {
+                    _uiState.value = _uiState.value.copy(pcConnectionStatus = res.error)
+                    speakText("Could not reach PC.")
+                }
+            }
+        }
+    }
+
+    fun updatePcConfig(newConfig: PcServerConfig) {
+        pcBridge.updateConfig(newConfig)
     }
 
     private fun speakText(text: String) {
@@ -531,6 +678,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             } else {
                 @Suppress("DEPRECATION")
                 val vibrator = ctx.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                @Suppress("DEPRECATION")
                 vibrator?.vibrate(durationMs)
             }
         } catch (e: Exception) {

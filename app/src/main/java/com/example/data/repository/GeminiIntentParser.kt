@@ -3,6 +3,7 @@ package com.example.data.repository
 import com.example.BuildConfig
 import com.example.data.model.CommandType
 import com.example.data.model.ParsedIntent
+import com.example.data.model.PcAction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -32,8 +33,13 @@ class GeminiIntentParser {
             )
         }
 
-        // 1. Check for emergency stop immediately
-        if (isEmergencyStop(trimmed)) {
+        // 1. Strip wake word prefix if present (e.g. "Hi Jarvis, call Papa")
+        val wakeWordRegex = Regex("""^(?:hi|hey|ok|hello|namaste|suno)?\s*jarvis[,:\s]*""", RegexOption.IGNORE_CASE)
+        val cleanedSpeech = trimmed.replace(wakeWordRegex, "").trim()
+        val speechToParse = if (cleanedSpeech.isNotEmpty()) cleanedSpeech else trimmed
+
+        // 2. Check for emergency stop immediately
+        if (isEmergencyStop(speechToParse)) {
             return@withContext ParsedIntent(
                 commandType = CommandType.EMERGENCY_STOP,
                 spokenResponse = "Emergency stop activated. Halting all actions.",
@@ -41,17 +47,17 @@ class GeminiIntentParser {
             )
         }
 
-        // 2. High-speed local pattern matching (English, Hindi, Hinglish)
-        val localIntent = parseWithLocalEngine(trimmed)
+        // 3. High-speed local pattern matching (English, Hindi, Hinglish)
+        val localIntent = parseWithLocalEngine(speechToParse)
         if (localIntent != null && localIntent.confidence >= 0.85f) {
             return@withContext localIntent
         }
 
-        // 3. Fallback to Gemini AI if API key is configured
+        // 4. Fallback to Gemini AI if API key is configured
         val apiKey = try { BuildConfig.GEMINI_API_KEY } catch (e: Exception) { "" }
         if (apiKey.isNotEmpty() && apiKey != "MY_GEMINI_API_KEY") {
             try {
-                val aiIntent = parseWithGeminiApi(trimmed, apiKey)
+                val aiIntent = parseWithGeminiApi(speechToParse, apiKey)
                 if (aiIntent != null) {
                     return@withContext aiIntent
                 }
@@ -60,10 +66,10 @@ class GeminiIntentParser {
             }
         }
 
-        // 4. Fallback to local intent or unknown response
+        // 5. Fallback to local intent or unknown response
         return@withContext localIntent ?: ParsedIntent(
             commandType = CommandType.UNKNOWN,
-            spokenResponse = "I heard: \"$trimmed\", but could not determine the exact command. Try saying \"Call Papa\", \"Open WhatsApp\", or \"Search YouTube\"."
+            spokenResponse = "I heard: \"$speechToParse\", but could not determine the exact command. Try saying \"Call Papa\", \"Open WhatsApp\", \"Lock PC\", or \"Turn on flashlight\"."
         )
     }
 
@@ -78,6 +84,181 @@ class GeminiIntentParser {
 
     private fun parseWithLocalEngine(text: String): ParsedIntent? {
         val lower = text.lowercase()
+
+        // --- Windows PC Commands ---
+        // "Lock my PC", "Lock PC"
+        if (lower.matches(Regex("""(?:lock\s+(?:my\s+)?pc|lock\s+computer)"""))) {
+            return ParsedIntent(
+                commandType = CommandType.PC_COMMAND,
+                pcAction = PcAction.LOCK_PC,
+                spokenResponse = "Locking your Windows PC workstation.",
+                confidence = 0.98f,
+                isConsequential = false
+            )
+        }
+
+        // "Shutdown PC", "Turn off PC"
+        if (lower.matches(Regex("""(?:shutdown\s+(?:my\s+)?pc|turn\s+off\s+(?:my\s+)?pc)"""))) {
+            return ParsedIntent(
+                commandType = CommandType.PC_COMMAND,
+                pcAction = PcAction.SHUTDOWN_PC,
+                spokenResponse = "Initiating PC shutdown in 5 seconds. Say cancel to abort.",
+                confidence = 0.98f,
+                isConsequential = true
+            )
+        }
+
+        // Media controls on PC
+        if (lower.contains("pc") && (lower.contains("play") || lower.contains("pause") || lower.contains("media"))) {
+            return ParsedIntent(
+                commandType = CommandType.PC_COMMAND,
+                pcAction = PcAction.MEDIA_PLAY_PAUSE,
+                spokenResponse = "Toggling media playback on PC.",
+                confidence = 0.95f
+            )
+        }
+        if (lower.contains("pc") && (lower.contains("next song") || lower.contains("skip song") || lower.contains("next track"))) {
+            return ParsedIntent(
+                commandType = CommandType.PC_COMMAND,
+                pcAction = PcAction.MEDIA_NEXT,
+                spokenResponse = "Skipping to next track on PC.",
+                confidence = 0.95f
+            )
+        }
+        if (lower.contains("pc") && (lower.contains("volume up") || lower.contains("increase volume"))) {
+            return ParsedIntent(
+                commandType = CommandType.PC_COMMAND,
+                pcAction = PcAction.VOLUME_UP,
+                spokenResponse = "Increasing volume on PC.",
+                confidence = 0.95f
+            )
+        }
+        if (lower.contains("pc") && (lower.contains("volume down") || lower.contains("decrease volume"))) {
+            return ParsedIntent(
+                commandType = CommandType.PC_COMMAND,
+                pcAction = PcAction.VOLUME_DOWN,
+                spokenResponse = "Decreasing volume on PC.",
+                confidence = 0.95f
+            )
+        }
+        if (lower.contains("pc") && lower.contains("mute")) {
+            return ParsedIntent(
+                commandType = CommandType.PC_COMMAND,
+                pcAction = PcAction.MUTE,
+                spokenResponse = "Muting audio on PC.",
+                confidence = 0.95f
+            )
+        }
+
+        // "Open Chrome on PC", "Open Notepad on PC"
+        val pcAppMatch = Regex("""open\s+([a-zA-Z0-9\s]+?)\s+on\s+pc""", RegexOption.IGNORE_CASE).find(text)
+        if (pcAppMatch != null) {
+            val appTarget = pcAppMatch.groupValues[1].trim()
+            val isUrl = appTarget.contains(".")
+            return ParsedIntent(
+                commandType = CommandType.PC_COMMAND,
+                pcAction = if (isUrl) PcAction.OPEN_URL else PcAction.OPEN_APP,
+                pcPayload = appTarget,
+                spokenResponse = "Opening $appTarget on PC.",
+                confidence = 0.95f
+            )
+        }
+
+        // --- System Controls: Torch / Flashlight ---
+        if (lower.contains("flashlight") || lower.contains("torch")) {
+            val turnOn = !lower.contains("off") && !lower.contains("band")
+            return ParsedIntent(
+                commandType = CommandType.TORCH_TOGGLE,
+                settingTarget = "torch",
+                settingValue = if (turnOn) "on" else "off",
+                spokenResponse = if (turnOn) "Turning on flashlight." else "Turning off flashlight.",
+                confidence = 0.98f
+            )
+        }
+
+        // --- System Controls: Volume & Mute ---
+        if (lower.matches(Regex("""(?:volume\s+up|increase\s+volume|sound\s+up|aawaz\s+badhao)"""))) {
+            return ParsedIntent(
+                commandType = CommandType.VOLUME_CONTROL,
+                settingTarget = "volume",
+                settingValue = "up",
+                spokenResponse = "Increasing volume.",
+                confidence = 0.98f
+            )
+        }
+        if (lower.matches(Regex("""(?:volume\s+down|decrease\s+volume|sound\s+down|aawaz\s+kam\s+karo)"""))) {
+            return ParsedIntent(
+                commandType = CommandType.VOLUME_CONTROL,
+                settingTarget = "volume",
+                settingValue = "down",
+                spokenResponse = "Decreasing volume.",
+                confidence = 0.98f
+            )
+        }
+        if (lower.matches(Regex("""(?:mute\s+volume|mute\s+phone|mute\s+sound|silent\s+phone)"""))) {
+            return ParsedIntent(
+                commandType = CommandType.VOLUME_CONTROL,
+                settingTarget = "volume",
+                settingValue = "mute",
+                spokenResponse = "Muting device audio.",
+                confidence = 0.98f
+            )
+        }
+
+        // --- System Settings Panels ---
+        if (lower.contains("wifi") || lower.contains("wi-fi")) {
+            return ParsedIntent(
+                commandType = CommandType.SYSTEM_SETTING,
+                settingTarget = "wifi",
+                spokenResponse = "Opening Wi-Fi settings panel.",
+                confidence = 0.98f
+            )
+        }
+        if (lower.contains("bluetooth")) {
+            return ParsedIntent(
+                commandType = CommandType.SYSTEM_SETTING,
+                settingTarget = "bluetooth",
+                spokenResponse = "Opening Bluetooth settings.",
+                confidence = 0.98f
+            )
+        }
+        if (lower.contains("brightness") || (lower.contains("display") && lower.contains("setting"))) {
+            return ParsedIntent(
+                commandType = CommandType.SYSTEM_SETTING,
+                settingTarget = "brightness",
+                spokenResponse = "Opening Display and Brightness settings.",
+                confidence = 0.98f
+            )
+        }
+        if (lower.contains("battery") && lower.contains("setting")) {
+            return ParsedIntent(
+                commandType = CommandType.SYSTEM_SETTING,
+                settingTarget = "battery",
+                spokenResponse = "Opening Battery settings.",
+                confidence = 0.98f
+            )
+        }
+
+        // --- Open Files ---
+        if (lower.matches(Regex("""(?:open\s+files?|browse\s+files?|open\s+file\s+explorer|show\s+my\s+files?)"""))) {
+            return ParsedIntent(
+                commandType = CommandType.OPEN_FILE,
+                spokenResponse = "Opening device file browser.",
+                confidence = 0.98f
+            )
+        }
+
+        // --- Web Search ---
+        val webSearchMatch = Regex("""(?:search\s+(?:the\s+)?web\s+for\s+|google\s+search\s+(?:for\s+)?|search\s+on\s+google\s+(?:for\s+)?)(.+)""", RegexOption.IGNORE_CASE).find(text)
+        if (webSearchMatch != null) {
+            val q = webSearchMatch.groupValues[1].trim()
+            return ParsedIntent(
+                commandType = CommandType.WEB_SEARCH,
+                searchQuery = q,
+                spokenResponse = "Searching the web for $q.",
+                confidence = 0.96f
+            )
+        }
 
         // --- WhatsApp Video Call ---
         // "Open WhatsApp and video call Papa" / "WhatsApp pe Papa ko video call karo"
@@ -97,9 +278,6 @@ class GeminiIntentParser {
         }
 
         // --- WhatsApp Message ---
-        // "Send a WhatsApp message to Rahul saying I will arrive in ten minutes"
-        // "Rahul ko WhatsApp message bhejo ki I will arrive in ten minutes"
-        // "WhatsApp Rahul I will arrive soon"
         val waMsgRegex1 = Regex("""(?:send\s+(?:a\s+)?whatsapp\s+message\s+to\s+)([a-zA-Z0-9\s]+?)(?:\s+saying\s+|\s+that\s+|\s*:\s*)(.+)""", RegexOption.IGNORE_CASE)
         val waMsgMatch1 = waMsgRegex1.find(text)
         if (waMsgMatch1 != null) {
@@ -154,10 +332,6 @@ class GeminiIntentParser {
         }
 
         // --- YouTube Search ---
-        // "Open YouTube and search for Python tutorials"
-        // "YouTube pe Python tutorials search karo"
-        // "Search Python tutorials on YouTube"
-        val ytRegex1 = Regex("""(?:open\s+youtube\s+and\s+search\s+(?:for\s+)?|search\s+youtube\s+for\s+|search\s+for\s+)(.+?)(?:\s+on\s+youtube)?$""", RegexOption.IGNORE_CASE)
         if (lower.contains("youtube")) {
             val query = when {
                 lower.contains("search for ") -> text.substringAfter("search for ", "").replace(Regex("""(?i)\s+on\s+youtube"""), "").trim()
@@ -179,7 +353,6 @@ class GeminiIntentParser {
         }
 
         // --- Calendar Events ---
-        // "Read my upcoming calendar events" / "What are my calendar events" / "Calendar check karo"
         if (lower.contains("calendar") || lower.contains("upcoming events") || lower.contains("schedule") || lower.contains("meeting")) {
             return ParsedIntent(
                 commandType = CommandType.READ_CALENDAR,
@@ -190,7 +363,6 @@ class GeminiIntentParser {
         }
 
         // --- Phone Call ---
-        // Hinglish calling patterns first: "Papa ko call lagao", "Rahul ko phone karo"
         val callRegexHinglish = Regex("""([a-zA-Z0-9\s]+?)\s+ko\s+(?:call\s+lagao|phone\s+karo|call\s+karo)""", RegexOption.IGNORE_CASE)
         val callMatchHinglish = callRegexHinglish.find(text)
         if (callMatchHinglish != null) {
@@ -204,7 +376,6 @@ class GeminiIntentParser {
             )
         }
 
-        // English calling patterns: "Call Papa", "Call Rahul", "Open phone dialer and call Rahul"
         val callRegex1 = Regex("""^\s*(?:open\s+(?:the\s+)?phone\s+dialer\s+and\s+call\s+|call\s+|dial\s+|phone\s+)([a-zA-Z0-9\s]+)$""", RegexOption.IGNORE_CASE)
         val callMatch1 = callRegex1.find(text)
         if (callMatch1 != null && !lower.contains("video call") && !lower.contains("whatsapp")) {
@@ -221,7 +392,6 @@ class GeminiIntentParser {
         }
 
         // --- Launch Apps ---
-        // "Open WhatsApp"
         if (lower.matches(Regex("""(?:open|launch|start|kholo)\s+whatsapp.*""")) || lower == "whatsapp") {
             return ParsedIntent(
                 commandType = CommandType.LAUNCH_APP,
@@ -232,7 +402,6 @@ class GeminiIntentParser {
             )
         }
 
-        // "Open Instagram"
         if (lower.matches(Regex("""(?:open|launch|start|kholo)\s+instagram.*""")) || lower == "instagram") {
             return ParsedIntent(
                 commandType = CommandType.LAUNCH_APP,
@@ -243,7 +412,6 @@ class GeminiIntentParser {
             )
         }
 
-        // "Open YouTube"
         if (lower.matches(Regex("""(?:open|launch|start|kholo)\s+youtube.*""")) || lower == "youtube") {
             return ParsedIntent(
                 commandType = CommandType.LAUNCH_APP,
@@ -268,31 +436,30 @@ class GeminiIntentParser {
         val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=$apiKey"
 
         val systemInstruction = """
-            You are Jarvis, an advanced Android mobile voice assistant intent parser.
-            The user command can be in English, Hindi, or Hinglish.
-            Classify the user intent into one of these types:
-            - LAUNCH_APP (for opening apps like WhatsApp, Instagram, YouTube, etc.)
-            - CALL_PHONE (for placing phone calls or opening dialer to a contact or number)
-            - WHATSAPP_MESSAGE (for sending a WhatsApp message to a contact)
-            - WHATSAPP_VIDEO_CALL (for video calls on WhatsApp)
-            - WHATSAPP_VOICE_CALL (for voice calls on WhatsApp)
-            - YOUTUBE_SEARCH (for searching YouTube)
-            - READ_CALENDAR (for reading upcoming calendar events or schedule)
-            - EMERGENCY_STOP (for stop, cancel, halt commands)
-            - AMBIGUOUS_CLARIFICATION (if user command is missing contact, message, or ambiguous)
-            - UNKNOWN
+            You are Jarvis, an advanced Android mobile voice assistant intent parser that can control smartphone features and Windows PC.
+            Classify user intent into:
+            - LAUNCH_APP, CALL_PHONE, WHATSAPP_MESSAGE, WHATSAPP_VIDEO_CALL, YOUTUBE_SEARCH, READ_CALENDAR
+            - PC_COMMAND (lock pc, shutdown pc, media on pc, volume on pc, open app on pc)
+            - TORCH_TOGGLE (turn on/off flashlight)
+            - VOLUME_CONTROL (volume up/down, mute)
+            - SYSTEM_SETTING (open wifi, bluetooth, display, battery settings)
+            - WEB_SEARCH (search web for query)
+            - OPEN_FILE (open file manager)
+            - EMERGENCY_STOP, UNKNOWN
 
-            Respond ONLY with a valid JSON object matching this schema:
+            Output ONLY a JSON matching:
             {
-              "commandType": "LAUNCH_APP | CALL_PHONE | WHATSAPP_MESSAGE | WHATSAPP_VIDEO_CALL | WHATSAPP_VOICE_CALL | YOUTUBE_SEARCH | READ_CALENDAR | EMERGENCY_STOP | AMBIGUOUS_CLARIFICATION | UNKNOWN",
-              "targetApp": "AppName or null",
-              "targetPackage": "packageName or null",
-              "contactName": "ContactName or null",
-              "messageBody": "Message content or null",
-              "searchQuery": "Search query or null",
-              "spokenResponse": "Crisp, polite Jarvis vocal response to say to the user",
-              "isConsequential": boolean (true for calling or messaging, false for reading or launching apps),
-              "clarificationQuestion": "Question if clarification is needed, else null"
+              "commandType": "string",
+              "targetApp": "string or null",
+              "contactName": "string or null",
+              "messageBody": "string or null",
+              "searchQuery": "string or null",
+              "spokenResponse": "Polite Jarvis response",
+              "isConsequential": boolean,
+              "settingTarget": "wifi|bluetooth|torch|volume|brightness|battery or null",
+              "settingValue": "on|off|up|down|mute or null",
+              "pcAction": "LOCK_PC|SHUTDOWN_PC|MEDIA_PLAY_PAUSE|MEDIA_NEXT|VOLUME_UP|VOLUME_DOWN|MUTE|OPEN_APP|OPEN_URL or null",
+              "pcPayload": "string or null"
             }
         """.trimIndent()
 
@@ -344,24 +511,34 @@ class GeminiIntentParser {
             CommandType.UNKNOWN
         }
 
+        val pcActionStr = parsedJson.optString("pcAction", "")
+        val pcAction = if (pcActionStr.isNotEmpty()) {
+            try { PcAction.valueOf(pcActionStr) } catch (e: Exception) { null }
+        } else null
+
         val spoken = parsedJson.optString("spokenResponse", "Understood.")
         val targetApp = parsedJson.optString("targetApp", "").ifEmpty { null }
-        val targetPackage = parsedJson.optString("targetPackage", "").ifEmpty { null }
         val contactName = parsedJson.optString("contactName", "").ifEmpty { null }
         val messageBody = parsedJson.optString("messageBody", "").ifEmpty { null }
         val searchQuery = parsedJson.optString("searchQuery", "").ifEmpty { null }
         val isConsequential = parsedJson.optBoolean("isConsequential", false)
+        val settingTarget = parsedJson.optString("settingTarget", "").ifEmpty { null }
+        val settingValue = parsedJson.optString("settingValue", "").ifEmpty { null }
+        val pcPayload = parsedJson.optString("pcPayload", "").ifEmpty { null }
 
         return@withContext ParsedIntent(
             commandType = commandType,
             targetApp = targetApp,
-            targetPackage = targetPackage,
             contactName = contactName,
             messageBody = messageBody,
             searchQuery = searchQuery,
             spokenResponse = spoken,
             confidence = 0.98f,
-            isConsequential = isConsequential
+            isConsequential = isConsequential,
+            pcAction = pcAction,
+            pcPayload = pcPayload,
+            settingTarget = settingTarget,
+            settingValue = settingValue
         )
     }
 }

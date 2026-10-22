@@ -79,12 +79,15 @@ fun JarvisMainScreen(
 
     val quickCommands = listOf(
         "Open WhatsApp",
-        "Open Instagram",
         "Call Papa",
-        "Open WhatsApp and video call Papa",
         "Send a WhatsApp message to Rahul saying I will arrive in ten minutes",
+        "Lock my PC",
+        "Turn on flashlight",
         "Open YouTube and search for Python tutorials",
         "Read my upcoming calendar events",
+        "Search the web for Gemini AI",
+        "Open files",
+        "Increase volume",
         "Papa ko call lagao",
         "Rahul ko WhatsApp message bhejo ki I will arrive in 10 minutes"
     )

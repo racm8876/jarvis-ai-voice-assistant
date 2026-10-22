@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -15,10 +16,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
-import androidx.compose.material.icons.filled.Message
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
@@ -40,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.CommandType
 import com.example.data.model.ParsedIntent
+import com.example.data.model.PcAction
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCyan
 import com.example.ui.theme.JarvisGold
@@ -57,23 +60,28 @@ fun ActionConfirmationCard(
 ) {
     val progress = (remainingSeconds.toFloat() / totalSeconds.toFloat()).coerceIn(0f, 1f)
 
-    val (actionTitle, actionIcon, actionColor) = when (intent.commandType) {
-        CommandType.WHATSAPP_MESSAGE -> Triple(
+    val (actionTitle, actionIcon, actionColor) = when {
+        intent.commandType == CommandType.PC_COMMAND && intent.pcAction == PcAction.SHUTDOWN_PC -> Triple(
+            "Shutdown Windows PC",
+            Icons.Default.PowerSettingsNew,
+            JarvisRed
+        )
+        intent.commandType == CommandType.WHATSAPP_MESSAGE -> Triple(
             "Send WhatsApp Message",
-            Icons.Default.Message,
+            Icons.AutoMirrored.Filled.Message,
             JarvisCyan
         )
-        CommandType.CALL_PHONE -> Triple(
+        intent.commandType == CommandType.CALL_PHONE -> Triple(
             "Place Phone Call",
             Icons.Default.Call,
             JarvisGold
         )
-        CommandType.WHATSAPP_VIDEO_CALL -> Triple(
+        intent.commandType == CommandType.WHATSAPP_VIDEO_CALL -> Triple(
             "WhatsApp Video Call",
             Icons.Default.Videocam,
             JarvisCyan
         )
-        CommandType.WHATSAPP_VOICE_CALL -> Triple(
+        intent.commandType == CommandType.WHATSAPP_VOICE_CALL -> Triple(
             "WhatsApp Voice Call",
             Icons.Default.Call,
             JarvisCyan
@@ -187,6 +195,15 @@ fun ActionConfirmationCard(
                             fontSize = 13.sp
                         )
                     }
+
+                    if (intent.commandType == CommandType.PC_COMMAND) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Target Host: Windows PC Workstation",
+                            color = JarvisCyan,
+                            fontSize = 13.sp
+                        )
+                    }
                 }
             }
 
@@ -220,9 +237,7 @@ fun ActionConfirmationCard(
                     colors = ButtonDefaults.outlinedButtonColors(
                         contentColor = JarvisRed
                     ),
-                    border = ButtonDefaults.outlinedButtonBorder.copy(
-                        brush = androidx.compose.ui.graphics.SolidColor(JarvisRed.copy(alpha = 0.6f))
-                    )
+                    border = BorderStroke(1.dp, JarvisRed.copy(alpha = 0.6f))
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
@@ -251,7 +266,7 @@ fun ActionConfirmationCard(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Send Now", fontWeight = FontWeight.Bold)
+                    Text("Confirm Now", fontWeight = FontWeight.Bold)
                 }
             }
         }

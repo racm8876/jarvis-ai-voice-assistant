@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.data.local.JarvisDatabase
 import com.example.data.model.CommandHistoryEntity
 import com.example.data.model.CommandType
+import com.example.data.model.PcAction
 import com.example.data.repository.GeminiIntentParser
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -62,10 +63,51 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun testWakeWordPrefixStripping() = runBlocking {
+        val result = intentParser.parseCommand("Hi Jarvis, call Papa")
+        assertEquals(CommandType.CALL_PHONE, result.commandType)
+        assertEquals("Papa", result.contactName)
+    }
+
+    @Test
     fun testParseHinglishCall() = runBlocking {
         val result = intentParser.parseCommand("Papa ko call lagao")
         assertEquals(CommandType.CALL_PHONE, result.commandType)
         assertEquals("Papa", result.contactName)
+    }
+
+    @Test
+    fun testParseLockPc() = runBlocking {
+        val result = intentParser.parseCommand("Lock my PC")
+        assertEquals(CommandType.PC_COMMAND, result.commandType)
+        assertEquals(PcAction.LOCK_PC, result.pcAction)
+    }
+
+    @Test
+    fun testParseFlashlightToggle() = runBlocking {
+        val result = intentParser.parseCommand("Turn on flashlight")
+        assertEquals(CommandType.TORCH_TOGGLE, result.commandType)
+        assertEquals("on", result.settingValue)
+    }
+
+    @Test
+    fun testParseVolumeUp() = runBlocking {
+        val result = intentParser.parseCommand("Increase volume")
+        assertEquals(CommandType.VOLUME_CONTROL, result.commandType)
+        assertEquals("up", result.settingValue)
+    }
+
+    @Test
+    fun testParseOpenFiles() = runBlocking {
+        val result = intentParser.parseCommand("Open files")
+        assertEquals(CommandType.OPEN_FILE, result.commandType)
+    }
+
+    @Test
+    fun testParseWebSearch() = runBlocking {
+        val result = intentParser.parseCommand("Search the web for Android development")
+        assertEquals(CommandType.WEB_SEARCH, result.commandType)
+        assertEquals("Android development", result.searchQuery)
     }
 
     @Test

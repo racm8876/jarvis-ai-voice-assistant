@@ -18,8 +18,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.MenuBook
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.filled.Hearing
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PrivacyTip
 import androidx.compose.material.icons.filled.SettingsAccessibility
 import androidx.compose.material.icons.filled.Smartphone
@@ -65,7 +68,7 @@ fun SetupGuideScreen(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
             ) {
                 Icon(
-                    imageVector = Icons.Default.MenuBook,
+                    imageVector = Icons.AutoMirrored.Filled.MenuBook,
                     contentDescription = null,
                     tint = JarvisCyan,
                     modifier = Modifier.size(24.dp)
@@ -81,7 +84,7 @@ fun SetupGuideScreen(
                         letterSpacing = 1.sp
                     )
                     Text(
-                        text = "Windows, Android Studio & Real Device Guide",
+                        text = "Phone Automation, Windows PC Bridge & Lockscreen",
                         color = Color.Gray,
                         fontSize = 12.sp
                     )
@@ -89,45 +92,82 @@ fun SetupGuideScreen(
             }
         }
 
-        // Section 1: Windows & Android Studio Setup
+        // Section 1: Windows PC Companion Server (FastAPI)
         item {
             GuideSectionCard(
-                icon = Icons.Default.Code,
+                icon = Icons.Default.Computer,
                 iconTint = JarvisCyan,
-                title = "Windows & Android Studio Setup",
-                subtitle = "Building & running on local machine",
+                title = "Windows PC Companion Server Setup",
+                subtitle = "FastAPI Python Bridge for PC control",
                 content = {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        StepItem("1", "Clone or extract the project ZIP to a local folder (e.g. C:\\Projects\\JarvisAssistant).")
-                        StepItem("2", "Open Android Studio (Ladybug / Koala / Electric Eel or newer). Select 'Open' and choose the project root.")
-                        StepItem("3", "Ensure JDK 17 or JDK 21 is selected under Settings -> Build, Execution, Deployment -> Build Tools -> Gradle.")
-                        StepItem("4", "To build from Windows Command Prompt / PowerShell, run: gradle assembleDebug (or use Android Studio Run 'app').")
-                        StepItem("5", "To use Gemini 3.5 Flash for online intent parsing, set GEMINI_API_KEY in .env. When offline, Jarvis automatically uses its embedded on-device regex/NLP engine.")
+                        StepItem("1", "On your Windows PC, ensure Python 3.9+ is installed.")
+                        StepItem("2", "Open PowerShell or Command Prompt, and install requirements: pip install fastapi uvicorn")
+                        StepItem("3", "Run the provided companion server script: python scripts/jarvis_pc_server.py")
+                        StepItem("4", "The script prints your PC local IPv4 (e.g. 192.168.1.5) and default auth token 'jarvis_secret_key'.")
+                        StepItem("5", "In this app under 'PC Control' tab, enter your PC IP address and token, then tap 'Save & Ping PC'.")
+                        StepItem("6", "Now say: 'Hi Jarvis, lock my PC', 'Play media on PC', or 'Open Chrome on PC'.")
                     }
                 }
             )
         }
 
-        // Section 2: Real Android Device Testing & WhatsApp Automation
+        // Section 2: Background Wake Word & Lockscreen Experience
+        item {
+            GuideSectionCard(
+                icon = Icons.Default.Hearing,
+                iconTint = JarvisLime,
+                title = "Wake Word & Lock-Screen Integration",
+                subtitle = "Hands-free \"Hi Jarvis\" & secure screen wake",
+                content = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        BulletText("Wake Word Activation: Toggle 'Background Wake Word' on the 'PC Control' tab. Jarvis starts a foreground service with microphone listening.")
+                        BulletText("Lock-Screen Experience: MainActivity declares showWhenLocked='true' and turnScreenOn='true'. When 'Hi Jarvis' is detected, your phone screen lights up and displays Jarvis HUD over the lockscreen.")
+                        BulletText("Secure Authentication: Jarvis NEVER bypasses device lock security or steals PINs. Sensitive actions check Android Keyguard security before execution.")
+                        BulletText("Startup on Boot: BootReceiver automatically re-starts Jarvis background listening upon device reboot if enabled.")
+                    }
+                }
+            )
+        }
+
+        // Section 3: Android System Hardware Controls
         item {
             GuideSectionCard(
                 icon = Icons.Default.Smartphone,
-                iconTint = JarvisLime,
-                title = "Real Device Testing & WhatsApp Automation",
-                subtitle = "How real Android system intents work",
+                iconTint = JarvisAmber,
+                title = "System Toggles & Settings Panels",
+                subtitle = "Flashlight, Volume, Files & Wi-Fi",
+                content = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        BulletText("Flashlight / Torch: 'Turn on flashlight' / 'Turn off flashlight' uses CameraManager.setTorchMode.")
+                        BulletText("Volume Control: 'Increase volume', 'Volume down', 'Mute audio' uses AudioManager.")
+                        BulletText("Settings Panels: 'Open Wi-Fi settings', 'Open Bluetooth settings' launches direct Android Settings panels without breaking sandbox rules.")
+                        BulletText("File Browser: 'Open files' launches the native Android document picker.")
+                        BulletText("Web Search: 'Search the web for [topic]' launches Google Search.")
+                    }
+                }
+            )
+        }
+
+        // Section 4: WhatsApp Automation Details
+        item {
+            GuideSectionCard(
+                icon = Icons.Default.SettingsAccessibility,
+                iconTint = JarvisCyan,
+                title = "WhatsApp Automation & Accessibility Service",
+                subtitle = "Direct deep links + optional auto-send",
                 content = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
-                            text = "WhatsApp Deep Link & Call Pipeline:",
+                            text = "WhatsApp Integration Pipeline:",
                             color = JarvisCyan,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Meta does not provide a public background messaging API for WhatsApp without enterprise servers. Jarvis uses supported Android Intents:\n" +
-                                    "• Messaging: Intent.ACTION_VIEW with https://api.whatsapp.com/send?phone=...&text=... pre-populates the recipient and message.\n" +
-                                    "• Video/Voice Calls: Intent.ACTION_VIEW querying the contact's WhatsApp mime type (vnd.android.cursor.item/vnd.com.whatsapp.video.call).\n" +
-                                    "• Hands-Free Automation: Enabling JarvisAccessibilityService allows the app to automatically click 'Send' once WhatsApp opens.",
+                            text = "• Messaging: Intent.ACTION_VIEW with https://api.whatsapp.com/send?phone=...&text=... pre-populates recipient and text.\n" +
+                                    "• Video Calls: Intent.ACTION_VIEW querying the contact's WhatsApp mime type (vnd.android.cursor.item/vnd.com.whatsapp.video.call).\n" +
+                                    "• Optional Auto-Send: Enabling JarvisAccessibilityService allows the app to automatically click 'Send' once WhatsApp opens.",
                             color = Color(0xFFC7D7F0),
                             fontSize = 12.sp,
                             lineHeight = 18.sp
@@ -157,42 +197,24 @@ fun SetupGuideScreen(
             )
         }
 
-        // Section 3: Privacy & Consequential Action Safeguards
+        // Section 5: Voice Commands Reference
         item {
             GuideSectionCard(
-                icon = Icons.Default.PrivacyTip,
-                iconTint = JarvisAmber,
-                title = "Permissions, Privacy & Emergency Stop",
-                subtitle = "Zero background eavesdropping & safety gates",
-                content = {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        BulletText("No Background Recording: Jarvis only activates the microphone when you tap the Arc Reactor or trigger voice mode.")
-                        BulletText("5-Second Safety Safeguard: Before placing phone calls or sending messages, Jarvis displays a safety card with a countdown timer, allowing you to abort.")
-                        BulletText("Emergency Stop Command: Say 'Stop', 'Ruk jao', 'Cancel', or tap the red HALT button at any time to instantly stop speech, abort pending actions, and kill listeners.")
-                        BulletText("Local Persistence: Command logs are stored locally on your device in a private Room database.")
-                    }
-                }
-            )
-        }
-
-        // Section 4: Multilingual Voice Command Cheatsheet
-        item {
-            GuideSectionCard(
-                icon = Icons.Default.MenuBook,
+                icon = Icons.AutoMirrored.Filled.MenuBook,
                 iconTint = JarvisCyan,
                 title = "Voice Commands Reference (English & Hinglish)",
                 subtitle = "Supported command phrasing recipes",
                 content = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CommandExample("Open WhatsApp", "Opens WhatsApp application directly.")
-                        CommandExample("Open Instagram", "Opens Instagram application directly.")
-                        CommandExample("Call Papa", "Resolves contact 'Papa' / 'Dad' and initiates dialer/call.")
-                        CommandExample("Papa ko call lagao", "Hinglish calling command.")
-                        CommandExample("Open WhatsApp and video call Papa", "Triggers direct WhatsApp video call.")
+                        CommandExample("Hi Jarvis, call Papa", "Wakes assistant, resolves Papa, initiates phone call.")
+                        CommandExample("Lock my PC", "Locks your Windows PC workstation via FastAPI server.")
+                        CommandExample("Play media on PC", "Toggles Spotify / YouTube media play/pause on PC.")
+                        CommandExample("Turn on flashlight", "Toggles Android torch via CameraManager.")
+                        CommandExample("Volume up / Aawaz badhao", "Increases Android media volume.")
+                        CommandExample("Open Wi-Fi settings", "Opens Android Wi-Fi settings panel.")
+                        CommandExample("Open files", "Opens Android file manager.")
+                        CommandExample("Search the web for Python tutorials", "Performs web search.")
                         CommandExample("Send a WhatsApp message to Rahul saying I will arrive in ten minutes", "Pre-fills message to recipient with 5-second safety confirmation.")
-                        CommandExample("Rahul ko WhatsApp message bhejo ki 10 minute me aa raha hu", "Hinglish WhatsApp message with prefilled text.")
-                        CommandExample("Open YouTube and search for Python tutorials", "Launches YouTube search intent.")
-                        CommandExample("Read my upcoming calendar events", "Fetches upcoming schedule from device calendar and speaks it aloud.")
                         CommandExample("Emergency Stop / Ruk jao", "Instantly kills all audio, speech, and pending actions.")
                     }
                 }
